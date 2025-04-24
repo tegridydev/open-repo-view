@@ -1,56 +1,58 @@
-# v0.1
+#!/usr/bin/env python3
 """
 open-repo-view (orv): GitHub traffic insights + mini web dashboard + interactive CLI.
 """
 
-import os
-import sys
-import sqlite3
-import threading
-import time
-import requests
+import os, sys, sqlite3, threading, requests
 from flask import Flask, render_template_string
 from datetime import datetime, timedelta
 from collections import defaultdict
 
 # ─── Config ────────────────────────────────────────────────────────────────────
 
-TOKEN = os.getenv("GITHUB_TOKEN")
+# Read ORV_TOKEN (Codespaces) or fall back to GITHUB_TOKEN (Actions)
+TOKEN = os.getenv("ORV_TOKEN") or os.getenv("GITHUB_TOKEN")
 if not TOKEN:
-    print("‼️  ERROR: GITHUB_TOKEN env var missing", file=sys.stderr)
+    print("‼️ ERROR: ORV_TOKEN (Codespaces) or GITHUB_TOKEN (Actions) missing", file=sys.stderr)
     sys.exit(1)
 
 API = "https://api.github.com"
-HEADERS = {
-    "Authorization": f"Bearer {TOKEN}",
-    "Accept": "application/vnd.github+json"
-}
+HEADERS = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json"}
 
 # auto-detect owner
-r = requests.get(f"{API}/user", headers=HEADERS)
-r.raise_for_status()
-OWNER = r.json()["login"]
+try:
+    r = requests.get(f"{API}/user", headers=HEADERS); r.raise_for_status()
+    OWNER = r.json()["login"]
+except Exception as e:
+    print(f"‼️ Failed to detect owner: {e}", file=sys.stderr)
+    sys.exit(1)
 
-# Persistence
-DB = "traffic.db"
-CSV = "github_traffic.csv"
+# files & lookback
+DB       = "traffic.db"
+CSV      = "github_traffic.csv"
 LOOKBACK = 14  # days
 
 # ─── API Helpers ───────────────────────────────────────────────────────────────
 
 def list_repos():
-    url = f"{API}/user/repos?affiliation=owner&per_page=100"
+    url   = f"{API}/user/repos?affiliation=owner&per_page=100"
     names = []
     while url:
-        r = requests.get(url, headers=HEADERS); r.raise_for_status()
-        names += [j["name"] for j in r.json()]
+        r = requests.get(url, headers=HEADERS)
+        if r.status_code != 200:
+            print(f"⚠️ list_repos got {r.status_code}", file=sys.stderr)
+            break
+        for item in r.json():
+            if not item.get("fork", False):
+                names.append(item["name"])
         url = r.links.get("next", {}).get("url")
     return names
 
 def fetch(kind, repo, per="day"):
     url = f"{API}/repos/{OWNER}/{repo}/traffic/{kind}"
-    r = requests.get(url, headers=HEADERS, params={"per": per})
-    if r.status_code == 404:
+    r   = requests.get(url, headers=HEADERS, params={"per": per})
+    if r.status_code in (403, 404):
+        print(f"⚠️ Skipping {repo}/{kind}: {r.status_code} {r.reason}")
         return []
     r.raise_for_status()
     data = r.json()
@@ -58,23 +60,29 @@ def fetch(kind, repo, per="day"):
 
 def fetch_referrers(repo):
     url = f"{API}/repos/{OWNER}/{repo}/traffic/popular/referrers"
-    r = requests.get(url, headers=HEADERS)
-    return r.json() if r.ok else []
+    r   = requests.get(url, headers=HEADERS)
+    if r.status_code in (403, 404):
+        print(f"⚠️ Skipping referrers for {repo}: {r.status_code}")
+        return []
+    r.raise_for_status()
+    return r.json()
 
 def fetch_paths(repo):
     url = f"{API}/repos/{OWNER}/{repo}/traffic/popular/paths"
-    r = requests.get(url, headers=HEADERS)
-    return r.json() if r.ok else []
+    r   = requests.get(url, headers=HEADERS)
+    if r.status_code in (403, 404):
+        print(f"⚠️ Skipping paths for {repo}: {r.status_code}")
+        return []
+    r.raise_for_status()
+    return r.json()
 
 def show_rate_limit():
-    r = requests.get(f"{API}/rate_limit", headers=HEADERS)
-    r.raise_for_status()
-    rl = r.json()["resources"]["core"]
-    reset_ts = rl["reset"]
-    reset_time = datetime.fromtimestamp(reset_ts).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"🔋 Rate limit: {rl['limit']} ↑ / hr")
-    print(f"⚡ Remaining: {rl['remaining']}")
-    print(f"⏳ Resets at: {reset_time}")
+    r = requests.get(f"{API}/rate_limit", headers=HEADERS); r.raise_for_status()
+    core = r.json()["resources"]["core"]
+    reset = datetime.fromtimestamp(core["reset"]).strftime("%Y-%m-%d %H:%M")
+    print(f"🔋 Limit:     {core['limit']} / hr")
+    print(f"⚡ Remaining: {core['remaining']}")
+    print(f"⏳ Resets at: {reset} UTC")
 
 # ─── Storage ───────────────────────────────────────────────────────────────────
 
@@ -114,22 +122,22 @@ def dashboard():
         dates, views, clones = zip(*rows)
     else:
         dates, views, clones = [], [], []
+
     tpl = """
     <!doctype html><html><head>
-      <title>{{owner}}’s GitHub Traffic</title>
+      <title>{{owner}} Traffic</title>
       <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     </head><body>
       <h1>{{owner}} (last {{lookback}} days)</h1>
       <canvas id="chart"></canvas>
       <script>
-        const ctx = document.getElementById('chart');
-        new Chart(ctx, {
-          type: 'line',
-          data: {
-            labels: {{dates}},
-            datasets: [
-              { label: 'Views', data: {{views}}, borderColor: 'blue', fill: false },
-              { label: 'Clones', data: {{clones}}, borderColor: 'green', fill: false }
+        new Chart(...{
+          type:'line',
+          data:{
+            labels:{{dates}},
+            datasets:[
+              {label:'Views', data:{{views}}, borderColor:'blue', fill:false},
+              {label:'Clones', data:{{clones}}, borderColor:'green', fill:false}
             ]
           }
         });
@@ -152,17 +160,15 @@ MENU = """
 2) Show top referrers for a repo
 3) Show top content paths for a repo
 4) Launch web dashboard
-5) Show API rate‐limit status
+5) Show API rate-limit
 6) Quit
 """
 
 def fetch_daily():
     print(f"⏳ Fetching last {LOOKBACK} days…")
     cutoff = (datetime.utcnow() - timedelta(days=LOOKBACK)).strftime("%Y-%m-%d")
-    conn = init_db()
-    totals = defaultdict(lambda: {
-      "views":0, "unique_views":0, "clones":0, "unique_clones":0
-    })
+    conn   = init_db()
+    totals = defaultdict(lambda: {"views":0,"unique_views":0,"clones":0,"unique_clones":0})
 
     for repo in list_repos():
         for e in fetch("views", repo):
@@ -178,6 +184,7 @@ def fetch_daily():
 
     for day, stats in totals.items():
         save_day(conn, day, stats)
+
     with open(CSV, "w") as f:
         f.write("Date,Views,UniqViews,Clones,UniqClones\n")
         for day in sorted(totals):

@@ -1,10 +1,9 @@
 {
-    "image": "mcr.microsoft.com/devcontainers/python:3.11",
-    "forwardPorts": [5000],
-    "postCreateCommand": "pip install -r requirements.txt",
-    "secrets": ["GITHUB_TOKEN"],
-    "remoteEnv": {
-      "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}"
-    }
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "forwardPorts": [5000],
+  "postCreateCommand": "pip install -r requirements.txt",
+  "secrets": ["ORV_TOKEN"],
+  "remoteEnv": {
+    "ORV_TOKEN": "${localEnv:ORV_TOKEN}"
   }
-  
+}
