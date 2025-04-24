@@ -1,68 +1,47 @@
-# open-repo-view (orv)
+# open-repo-view (orv) | ~~tegridydev
 
-**Open-source** GitHub traffic insights, designed for Codespaces and GitHub Actions.
+**Open‑source** GitHub traffic insights for Codespaces, local dev, or CI
 
 ---
 
-## 🚀 Features
+## 🚀 Whatisit
 
-- 🔢 Interactive CLI with numbered menu
-- 📊 Fetch daily traffic (views/clones) for the last 14 days
-- 🔍 Analyze top referrers and most popular paths
-- 💾 Persist data to both SQLite and CSV
-- 🚦 Display GitHub API rate-limit status
-- 🌐 Launch a lightweight Flask dashboard (Chart.js-powered)
+- 🔢 Interactive CLI (`python orv.py`)
+- 📊 Fetch & aggregate **views** / **clones** for the last 14 days (all your repos)
+- 📝 Instant text report (totals • averages • best days)
+- 💾 Persist to **SQLite** *and*  **CSV**&#x20;
+- 🌐 Flask + Chart.js dashboard
+- 🚦 Show GitHub API rate‑limit
+- 🔐 Fine‑grained PAT helper (shows missing permissions)
 
 ---
 
 ## ⚡ Quickstart
 
-### 1. Clone & Launch in Codespaces
-```bash
-gh repo clone tegridydev/open-repo-view
-gh codespace create --repo tegridydev/open-repo-view
-gh codespace open
-```
 
-### 2. Set Up Token
-Codespaces auto-prompts GITHUB_TOKEN permission. For local dev:
-```bash
-export GITHUB_TOKEN=your_token_here
-```
-Or create a `.env` file with:
-```env
-GITHUB_TOKEN=your_token_here
-```
-
-### 3. Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Run the Tool
-```bash
-python orv.py
-```
-
-Menu Options:
-```
-1: Fetch & save traffic data (CSV + DB)
-2: View top referrers
-3: View popular paths
-4: Launch dashboard (http://localhost:5000)
-5: Show rate-limit status
-6: Quit
-```
+1. **Fork this repo** to your account.
+2. In your fork, open **Settings ▸ Secrets & variables ▸ Codespaces ▸ New secret** and create `ORV_TOKEN` (leave the value blank for now).
+3. In another tab, generate a Personal Access Token with either:
+   - **Classic PAT** → tick `repo` scope, or
+   - **Fine‑grained PAT** → enable **Repository ▸ Administration ▸ Read (Traffic)**.
+     Copy the token and paste it into the `ORV_TOKEN` secret you created in step 2.
+4. Back on the repo home page, click **Code ▸ Codespaces ▸ “Create codespace”** (or the badge above).\
+   The dev‑container auto‑installs Python + deps.
+5. When the Codespace is ready, run:
+   ```bash
+   python orv.py    # open the interactive menu
+   ```
+   Use `-v` for verbose per‑repo logging or choose option **4** to pop the dashboard.
 
 ---
 
 ## 🤖 Automate with GitHub Actions
-Use GitHub's built-in token—no secrets required:
+
 ```yaml
 - run: |
     python orv.py
     git add github_traffic.csv traffic.db
-    git commit -m "update traffic"
+    git commit -m "chore: update traffic" || echo "no changes"
     git push
   env:
     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -70,16 +49,17 @@ Use GitHub's built-in token—no secrets required:
 
 ---
 
-## 📡 GitHub REST API Reference
+## 📡 GitHub REST API endpoints
 
-- `GET /repos/{owner}/{repo}/traffic/views?per=day|week`
-- `GET /repos/{owner}/{repo}/traffic/clones?per=day|week`
-- `GET /repos/{owner}/{repo}/traffic/popular/referrers`
-- `GET /repos/{owner}/{repo}/traffic/popular/paths`
-- `GET /rate_limit` — to monitor API usage
+```
+GET /repos/{owner}/{repo}/traffic/views?per=day
+GET /repos/{owner}/{repo}/traffic/clones?per=day
+GET /repos/{owner}/{repo}/traffic/popular/referrers
+GET /repos/{owner}/{repo}/traffic/popular/paths
+GET /rate_limit
+```
 
 ---
 
-Built with ❤️ for devs who love simple, transparent tooling.
+Built with ❤️ by [@tegridydev](https://github.com/tegridydev)
 
-> Maintained by [@tegridydev](https://github.com/tegridydev)

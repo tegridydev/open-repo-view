@@ -1,158 +1,230 @@
 #!/usr/bin/env python3
 """
 open-repo-view (orv)
-────────────────────
-GitHub traffic insights → interactive CLI + mini Flask/Chart.js dashboard.
+────────────────────────────────────────────
+automatically generate repo traffic report (totals, averages, best day)
 
-Key features
-============
-• Works with classic *and* fine-grained PATs
-• Prints exact permission you’re missing (via X-Accepted-GitHub-Permissions)
-• Persists aggregated traffic (14-day rolling window) to SQLite + CSV
-• Zero heavy deps – only `requests` & `flask`
 """
 
 from __future__ import annotations
 
+import argparse
+import csv
 import os
 import sys
 import sqlite3
 import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Dict, List
 
 import requests
-from flask import Flask, render_template_string
+from flask import Flask
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TimeElapsedColumn,
+)
+from rich.table import Table
 
-# ── Config ──────────────────────────────────────────────────────────────────
+# ── CLI flags ────────────────────────────────────────────────────────────────
+parser = argparse.ArgumentParser(prog="orv", add_help=False)
+parser.add_argument(
+    "-v", "--verbose", action="store_true", help="print each repo as it's processed"
+)
+args, _ = parser.parse_known_args()
 
+# ── Config ───────────────────────────────────────────────────────────────────
 TOKEN = os.getenv("ORV_TOKEN") or os.getenv("GITHUB_TOKEN")
 if not TOKEN:
-    sys.exit("‼️  ORV_TOKEN (or GITHUB_TOKEN) not set – add it as a secret/env.")
+    sys.exit("‼️  ORV_TOKEN / GITHUB_TOKEN missing.")
 
 API = "https://api.github.com"
-HEADERS = {
-    "Authorization": f"Bearer {TOKEN}",
-    "Accept": "application/vnd.github+json",
-}
-LOOKBACK_DAYS = 14
+HEADERS = {"Authorization": f"Bearer {TOKEN}",
+           "Accept": "application/vnd.github+json"}
+LOOKBACK = 14  # days
 DB_PATH = "traffic.db"
 CSV_PATH = "github_traffic.csv"
+console = Console()
 
-# ── Detect user + token type ────────────────────────────────────────────────
-
-try:
-    resp = requests.get(f"{API}/user", headers=HEADERS)
-    resp.raise_for_status()
-    OWNER = resp.json()["login"]
-    scopes_hdr = resp.headers.get("X-OAuth-Scopes")  # Only on classic PATs
-
-    print(f"👤 Authenticated as: {OWNER}")
-    if scopes_hdr:  # Classic PAT
-        print(f"🔑 Token scopes: {scopes_hdr}")
-        if "repo" not in [s.strip() for s in scopes_hdr.split(",")]:
-            sys.exit("‼️  Token missing `repo` or `public_repo` scope required for traffic.")
-    else:  # Fine-grained PAT
-        print("🔑 Fine-grained PAT detected (no global scopes header).")
-except Exception as exc:
-    sys.exit(f"‼️  Failed token check → {exc}")
-
-# ── HTTP helper that surfaces missing permissions ───────────────────────────
+# ── Auth check ───────────────────────────────────────────────────────────────
 
 
-def _get(url: str, **params) -> requests.Response | None:
-    r = requests.get(url, headers=HEADERS, **params)
+def who_am_i() -> str:
+    r = requests.get(f"{API}/user", headers=HEADERS)
+    r.raise_for_status()
+    login = r.json()["login"]
+    scopes = r.headers.get("X-OAuth-Scopes")
+    console.print(f"👤 [bold]{login}[/] authenticated.")
+    if scopes:
+        console.print(f"🔑 scopes: {scopes}")
+        if "repo" not in [s.strip() for s in scopes.split(",")]:
+            sys.exit("‼️  token lacks `repo`/`public_repo` scope.")
+    else:
+        console.print("🔑 fine-grained PAT detected.")
+    return login
+
+
+OWNER = who_am_i()
+
+# ── Helper that surfaces missing permissions ────────────────────────────────
+
+
+def _get(url: str, **kw):
+    r = requests.get(url, headers=HEADERS, **kw)
     if r.status_code == 403:
-        need = r.headers.get("X-Accepted-GitHub-Permissions")
+        perms = r.headers.get("X-Accepted-GitHub-Permissions")
         msg = r.json().get("message", "Forbidden")
-        print(f"🚫 403 {url} – {msg}")
-        if need:
-            print(f"   🔐 Needs permissions → {need}")
-            print("   Enable **Repository → Administration → Read (Traffic)** in token.")
+        console.print(f"🚫 403 {url} – {msg}")
+        if perms:
+            console.print(
+                f"   needs → {perms}\n   enable Repository → Administration → Read (Traffic)"
+            )
         return None
     if r.status_code == 404:
-        return None  # repo private to token / no traffic
+        return None
     r.raise_for_status()
     return r
 
 
-# ── GitHub API helpers ──────────────────────────────────────────────────────
-
-
+# ── API helpers ──────────────────────────────────────────────────────────────
 def list_repos() -> List[str]:
     url = f"{API}/user/repos?affiliation=owner&per_page=100"
-    repos: List[str] = []
+    out: List[str] = []
     while url:
         r = _get(url)
         if r is None:
             break
-        repos += [repo["name"] for repo in r.json() if not repo.get("fork")]
+        out += [repo["name"] for repo in r.json() if not repo.get("fork")]
         url = r.links.get("next", {}).get("url")
-    return repos
+    return out
 
 
-def fetch_traffic(kind: str, repo: str) -> List[Dict[str, Any]]:
-    r = _get(f"{API}/repos/{OWNER}/{repo}/traffic/{kind}", params={"per": "day"})
+def fetch_traffic(kind: str, repo: str):
+    r = _get(f"{API}/repos/{OWNER}/{repo}/traffic/{kind}",
+             params={"per": "day"})
     if r is None:
         return []
-    payload = r.json()
-    return payload.get(kind) or payload.get("views") or payload.get("clones") or []
+    blob = r.json()
+    return blob.get(kind) or blob.get("views") or blob.get("clones") or []
 
 
-def fetch_referrers(repo: str) -> List[Dict[str, Any]]:
-    return _get(f"{API}/repos/{OWNER}/{repo}/traffic/popular/referrers") or []
-
-
-def fetch_paths(repo: str) -> List[Dict[str, Any]]:
-    return _get(f"{API}/repos/{OWNER}/{repo}/traffic/popular/paths") or []
-
-
-def show_rate_limit() -> None:
-    r = _get(f"{API}/rate_limit")
-    if r is None:
-        return
-    core = r.json()["resources"]["core"]
-    rst = datetime.fromtimestamp(core["reset"]).strftime("%Y-%m-%d %H:%M")
-    print(f"🔋 Limit {core['limit']}/h | Remaining {core['remaining']} | Resets {rst} UTC")
-
-
-# ── SQLite persistence ──────────────────────────────────────────────────────
-
-
+# ── DB + CSV helpers ─────────────────────────────────────────────────────────
 def init_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         """CREATE TABLE IF NOT EXISTS traffic(
-           date TEXT PRIMARY KEY,
-           views INTEGER, unique_views INTEGER,
-           clones INTEGER, unique_clones INTEGER
+            date TEXT PRIMARY KEY,
+            views INT, unique_views INT,
+            clones INT, unique_clones INT
         )"""
     )
     return conn
 
 
-def upsert(conn: sqlite3.Connection, day: str, stats: Dict[str, int]) -> None:
+def upsert(conn: sqlite3.Connection, day: str, s: Dict[str, int]):
     conn.execute(
         """INSERT INTO traffic VALUES (?,?,?,?,?)
            ON CONFLICT(date) DO UPDATE SET
-             views=excluded.views,
-             unique_views=excluded.unique_views,
-             clones=excluded.clones,
-             unique_clones=excluded.unique_clones""",
-        (
-            day,
-            stats["views"],
-            stats["unique_views"],
-            stats["clones"],
-            stats["unique_clones"],
-        ),
+             views=excluded.views, unique_views=excluded.unique_views,
+             clones=excluded.clones, unique_clones=excluded.unique_clones""",
+        (day, s["views"], s["unique_views"], s["clones"], s["unique_clones"]),
     )
     conn.commit()
 
 
-# ── Dashboard (Flask) ────────────────────────────────────────────────────────
+def write_csv(totals: Dict[str, Dict[str, int]]):
+    with open(CSV_PATH, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            ["Date", "DayOfWeek", "Views", "UniqueViews", "Clones", "UniqueClones"]
+        )
+        for d in sorted(totals):
+            s = totals[d]
+            dow = datetime.fromisoformat(d).strftime("%a")
+            writer.writerow(
+                [d, dow, s["views"], s["unique_views"], s["clones"], s["unique_clones"]])
 
+
+# ── Rich helpers ─────────────────────────────────────────────────────────────
+def print_report(summary: Dict[str, Dict[str, int]]) -> None:
+    total_views = sum(v["views"] for v in summary.values())
+    total_clones = sum(v["clones"] for v in summary.values())
+    best_day_v = max(summary.items(), key=lambda x: x[1]["views"])
+    best_day_c = max(summary.items(), key=lambda x: x[1]["clones"])
+
+    table = Table(title="📊 GitHub Traffic Report", box=None)
+    table.add_column("Metric", style="bold cyan")
+    table.add_column("Value", style="bold")
+
+    table.add_row("Window", f"{LOOKBACK} days")
+    table.add_row("Total views", f"{total_views:,}")
+    table.add_row("Total clones", f"{total_clones:,}")
+    table.add_row("Avg views/day", f"{total_views/LOOKBACK:.1f}")
+    table.add_row("Avg clones/day", f"{total_clones/LOOKBACK:.1f}")
+    table.add_row("Best view day",
+                  f"{best_day_v[0]} ({best_day_v[1]['views']})")
+    table.add_row("Best clone day",
+                  f"{best_day_c[0]} ({best_day_c[1]['clones']})")
+    console.print(table)
+
+
+# ── Main fetch routine ───────────────────────────────────────────────────────
+def fetch_daily():
+    cutoff = (datetime.utcnow() - timedelta(days=LOOKBACK)).date().isoformat()
+    totals: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    repos = list_repos()
+    console.print(f"⏳ Pulling {LOOKBACK}-day traffic for {len(repos)} repos…")
+
+    progress_cm = (
+        Progress(
+            SpinnerColumn(),
+            "[progress.percentage]{task.percentage:>3.0f}%",
+            BarColumn(),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
+        )
+        if not args.verbose
+        else None
+    )
+
+    iterator = progress_cm.track(
+        repos, description="Fetching") if progress_cm else repos
+    if progress_cm:
+        progress_cm.start()
+
+    for repo in iterator:
+        if args.verbose:
+            console.print(f"• {repo}")
+        for kind in ("views", "clones"):
+            for e in fetch_traffic(kind, repo):
+                day = e["timestamp"][:10]
+                if day < cutoff:
+                    continue
+                t = totals[day]
+                if kind == "views":
+                    t["views"] += e["count"]
+                    t["unique_views"] += e["uniques"]
+                else:
+                    t["clones"] += e["count"]
+                    t["unique_clones"] += e["uniques"]
+
+    if progress_cm:
+        progress_cm.stop()
+
+    conn = init_db()
+    for d, stat in totals.items():
+        upsert(conn, d, stat)
+
+    write_csv(totals)
+    console.print(f"✅ Saved → {CSV_PATH} & {DB_PATH}")
+    print_report(totals)
+
+
+# ── Dashboard (Flask) ────────────────────────────────────────────────────────
 app = Flask(__name__)
 
 
@@ -162,118 +234,71 @@ def dashboard():
         "SELECT date, views, clones FROM traffic ORDER BY date"
     ).fetchall()
     dates, views, clones = zip(*rows) if rows else ([], [], [])
-    tmpl = """
+    return f"""
 <!doctype html><html><head><meta charset="utf-8">
-<title>{{owner}} Traffic</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<style>
-body{font:16px/1.5 system-ui;margin:2rem}
-canvas{max-width:880px}
-</style></head><body>
-<h1>{{owner}} <small style="font-size:0.6em">last {{lookback}} days</small></h1>
-<canvas id="ch"></canvas>
+<title>{OWNER} Traffic</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>body{{font:16px/1.5 system-ui;margin:2rem}}</style></head><body>
+<h1>{OWNER} <small style="font-size:0.6em">last {LOOKBACK} days</small></h1>
+<canvas id="c"></canvas>
 <script>
-new Chart(ch,{
+new Chart(c,{{
   type:'line',
-  data:{labels:{{dates}},
-        datasets:[
-          {label:'Views', data:{{views}}, borderColor:'royalblue', fill:false},
-          {label:'Clones',data:{{clones}},borderColor:'seagreen', fill:false}
-        ]},
-  options:{responsive:true, interaction:{mode:'index',intersect:false}}
-});
-</script>
-</body></html>"""
-    return render_template_string(
-        tmpl,
-        owner=OWNER,
-        lookback=LOOKBACK_DAYS,
-        dates=list(dates),
-        views=list(views),
-        clones=list(clones),
-    )
+  data:{{labels:{list(dates)},
+        datasets:[{{label:'Views',data:{list(views)},borderColor:'royalblue',fill:false}},
+                  {{label:'Clones',data:{list(clones)},borderColor:'seagreen',fill:false}}]}}
+}});
+</script></body></html>"""
 
 
-def launch_dashboard() -> None:
-    print("🌐  Dashboard → http://localhost:5000")
+def launch_dashboard():
+    console.print("🌐  Dashboard → http://localhost:5000")
     app.run(host="0.0.0.0", port=5000, debug=False)
 
 
-# ── CLI actions ──────────────────────────────────────────────────────────────
-
-
-def fetch_daily() -> None:
-    """Aggregate last LOOKBACK_DAYS traffic across *all* repos."""
-    print(f"⏳ Pulling last {LOOKBACK_DAYS} days …")
-    cutoff = (datetime.utcnow() - timedelta(days=LOOKBACK_DAYS)).date().isoformat()
-    conn = init_db()
-    totals: Dict[str, Dict[str, int]] = defaultdict(
-        lambda: defaultdict(int)  # views / clones keyed by day
-    )
-
-    for repo in list_repos():
-        for entry in fetch_traffic("views", repo):
-            day = entry["timestamp"][:10]
-            if day >= cutoff:
-                st = totals[day]
-                st["views"] += entry["count"]
-                st["unique_views"] += entry["uniques"]
-        for entry in fetch_traffic("clones", repo):
-            day = entry["timestamp"][:10]
-            if day >= cutoff:
-                st = totals[day]
-                st["clones"] += entry["count"]
-                st["unique_clones"] += entry["uniques"]
-
-    # persist & CSV
-    for d, s in totals.items():
-        upsert(conn, d, s)
-
-    with open(CSV_PATH, "w", newline="") as fh:
-        fh.write("Date,Views,UniqViews,Clones,UniqClones\n")
-        for d in sorted(tals := totals):  # noqa: E501
-            s = tals[d]
-            fh.write(f"{d},{s['views']},{s['unique_views']},{s['clones']},{s['unique_clones']}\n")
-
-    print(f"✅ {len(tals)} days saved → {CSV_PATH}  |  SQLite → {DB_PATH}")
-
-
-def drill(getter, key: str) -> None:  # helper for referrers / paths
-    repo = input("Repo name: ").strip()
-    rows = getter(repo)[:10]
+# ── Drill-downs ──────────────────────────────────────────────────────────────
+def drill(which: str):
+    repo = console.input("Repo name: ").strip()
+    rows = (
+        _get(f"{API}/repos/{OWNER}/{repo}/traffic/popular/{which}") or [])[:10]
     if not rows:
-        print("ℹ️  No data (repo may not have enough traffic).")
-    for row in rows:
-        print(f"{row[key]} – {row['count']} hits ({row['uniques']} uniq)")
+        console.print("ℹ️  No data.")
+        return
+    tab = Table(title=f"Top {which} – {repo}", box=None)
+    tab.add_column(which.capitalize(), justify="left")
+    tab.add_column("Hits", justify="right")
+    tab.add_column("Unique", justify="right")
+    for r in rows:
+        tab.add_row(r[which[:-1]], str(r["count"]), str(r["uniques"]))
+    console.print(tab)
 
 
-def cli() -> None:
-    menu = """
-1) Fetch daily views & clones
-2) Top referrers for a repo
-3) Top content paths for a repo
-4) Launch web dashboard
-5) Show API rate-limit
-6) Quit
-"""
+# ── Menu ─────────────────────────────────────────────────────────────────────
+def menu():
     while True:
-        print(menu)
-        choice = input("Choose [1-6]: ").strip()
+        console.print(
+            "\n[bold]1[/]) Fetch & report  "
+            "[bold]2[/]) Referrers  "
+            "[bold]3[/]) Paths  "
+            "[bold]4[/]) Dashboard  "
+            "[bold]5[/]) Rate-limit  "
+            "[bold]6[/]) Quit"
+        )
+        choice = console.input("Select: ").strip()
         if choice == "1":
             fetch_daily()
         elif choice == "2":
-            drill(fetch_referrers, "referrer")
+            drill("referrers")
         elif choice == "3":
-            drill(fetch_paths, "path")
+            drill("paths")
         elif choice == "4":
             threading.Thread(target=launch_dashboard, daemon=True).start()
         elif choice == "5":
-            show_rate_limit()
+            _get(f"{API}/rate_limit")
         elif choice == "6":
             break
         else:
-            print("❓ Invalid choice")
+            console.print("❓ Invalid choice")
 
 
 if __name__ == "__main__":
-    cli()
+    menu()

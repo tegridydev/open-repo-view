@@ -1,13 +1,16 @@
 {
   "image": "mcr.microsoft.com/devcontainers/python:3.11-bookworm",
-
   "postCreateCommand": "pip install -r requirements.txt && pre-commit install || true",
-
-  "secrets": ["ORV_TOKEN"],
+  "secrets": {
+    "ORV_TOKEN": {} // empty object = OK
+    /* or:
+    "ORV_TOKEN": {
+      "description": "PAT with repo or traffic-read permission"
+    } */
+  },
   "remoteEnv": {
     "ORV_TOKEN": "${{ secrets.ORV_TOKEN }}"
   },
-
   "customizations": {
     "vscode": {
       "extensions": [
