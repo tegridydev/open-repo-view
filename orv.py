@@ -3,7 +3,11 @@
 open-repo-view (orv): GitHub traffic insights + mini web dashboard + interactive CLI.
 """
 
-import os, sys, sqlite3, threading, requests
+import os
+import sys
+import sqlite3
+import threading
+import requests
 from flask import Flask, render_template_string
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -16,7 +20,7 @@ if not TOKEN:
     print("‼️ ERROR: ORV_TOKEN (Codespaces) or GITHUB_TOKEN (Actions) missing", file=sys.stderr)
     sys.exit(1)
 
-API = "https://api.github.com"
+API     = "https://api.github.com"
 HEADERS = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json"}
 
 # auto-detect owner
@@ -35,6 +39,7 @@ LOOKBACK = 14  # days
 # ─── API Helpers ───────────────────────────────────────────────────────────────
 
 def list_repos():
+    """List non-fork repos you own."""
     url   = f"{API}/user/repos?affiliation=owner&per_page=100"
     names = []
     while url:
@@ -49,6 +54,7 @@ def list_repos():
     return names
 
 def fetch(kind, repo, per="day"):
+    """Fetch 'views' or 'clones'; skip 403/404."""
     url = f"{API}/repos/{OWNER}/{repo}/traffic/{kind}"
     r   = requests.get(url, headers=HEADERS, params={"per": per})
     if r.status_code in (403, 404):
@@ -124,29 +130,34 @@ def dashboard():
         dates, views, clones = [], [], []
 
     tpl = """
-    <!doctype html><html><head>
+    <!doctype html>
+    <html><head>
       <title>{{owner}} Traffic</title>
       <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     </head><body>
       <h1>{{owner}} (last {{lookback}} days)</h1>
       <canvas id="chart"></canvas>
       <script>
-        new Chart(...{
-          type:'line',
-          data:{
-            labels:{{dates}},
-            datasets:[
-              {label:'Views', data:{{views}}, borderColor:'blue', fill:false},
-              {label:'Clones', data:{{clones}}, borderColor:'green', fill:false}
+        new Chart(document.getElementById('chart'), {
+          type: 'line',
+          data: {
+            labels: {{dates}},
+            datasets: [
+              { label: 'Views', data: {{views}}, borderColor: 'blue', fill: false },
+              { label: 'Clones', data: {{clones}}, borderColor: 'green', fill: false }
             ]
           }
         });
       </script>
     </body></html>
     """
-    return render_template_string(tpl,
-      owner=OWNER, lookback=LOOKBACK,
-      dates=list(dates), views=list(views), clones=list(clones)
+    return render_template_string(
+        tpl,
+        owner=OWNER,
+        lookback=LOOKBACK,
+        dates=list(dates),
+        views=list(views),
+        clones=list(clones)
     )
 
 def run_dashboard():
@@ -206,18 +217,18 @@ def drill_paths():
 def main():
     while True:
         print(MENU)
-        c = input("Choose [1-6]: ").strip()
-        if c == "1":
+        choice = input("Choose [1-6]: ").strip()
+        if choice == "1":
             fetch_daily()
-        elif c == "2":
+        elif choice == "2":
             drill_referrers()
-        elif c == "3":
+        elif choice == "3":
             drill_paths()
-        elif c == "4":
+        elif choice == "4":
             threading.Thread(target=run_dashboard, daemon=True).start()
-        elif c == "5":
+        elif choice == "5":
             show_rate_limit()
-        elif c == "6":
+        elif choice == "6":
             break
         else:
             print("❓ Invalid choice")
