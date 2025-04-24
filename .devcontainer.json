@@ -1,9 +1,25 @@
 {
-  "image": "mcr.microsoft.com/devcontainers/python:3.11",
-  "forwardPorts": [5000],
-  "postCreateCommand": "pip install -r requirements.txt",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11-bookworm",
+
+  "postCreateCommand": "pip install -r requirements.txt && pre-commit install || true",
+
   "secrets": ["ORV_TOKEN"],
   "remoteEnv": {
-    "ORV_TOKEN": "${localEnv:ORV_TOKEN}"
+    "ORV_TOKEN": "${{ secrets.ORV_TOKEN }}"
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "editor.formatOnSave": true,
+        "ruff.format": true
+      }
+    }
   }
 }
