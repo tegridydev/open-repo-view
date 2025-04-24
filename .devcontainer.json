@@ -1,0 +1,10 @@
+{
+    "image": "mcr.microsoft.com/devcontainers/python:3.11",
+    "forwardPorts": [5000],
+    "postCreateCommand": "pip install -r requirements.txt",
+    "secrets": ["GITHUB_TOKEN"],
+    "remoteEnv": {
+      "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}"
+    }
+  }
+  
