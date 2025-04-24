@@ -1,6 +1,6 @@
 # open-repo-view (orv)
 
-**Minimalist**, secure, and interactive GitHub traffic insights—designed for Codespaces and GitHub Actions.
+**Open-source** GitHub traffic insights, designed for Codespaces and GitHub Actions.
 
 ---
 

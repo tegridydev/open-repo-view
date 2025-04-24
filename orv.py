@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# v0.1
 """
 open-repo-view (orv): GitHub traffic insights + mini web dashboard + interactive CLI.
 """
